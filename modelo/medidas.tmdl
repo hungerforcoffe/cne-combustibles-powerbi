@@ -1,0 +1,150 @@
+/// Tabla contenedora de medidas (exportada desde el modelo en formato TMDL).
+table _Medidas
+
+	/// Precio promedio por litro. Usar siempre filtrado por un combustible.
+	measure 'Precio Promedio' = AVERAGE ( fact_Precios[precio] )
+		formatString: $ #,##0
+		displayFolder: 1. Base
+
+	measure 'Precio Mínimo' = MIN ( fact_Precios[precio] )
+		formatString: $ #,##0
+		displayFolder: 1. Base
+
+	measure 'Precio Máximo' = MAX ( fact_Precios[precio] )
+		formatString: $ #,##0
+		displayFolder: 1. Base
+
+	measure 'N° Estaciones' = DISTINCTCOUNT ( fact_Precios[codigo_estacion] )
+		formatString: #,##0
+		displayFolder: 1. Base
+
+	/// Promedio país para el combustible filtrado (ignora filtros geográficos y de estación).
+	measure 'Precio Promedio Nacional' = CALCULATE ( [Precio Promedio], REMOVEFILTERS ( dim_Comuna ), REMOVEFILTERS ( dim_Estacion ) )
+		formatString: $ #,##0
+		displayFolder: 2. Comparación
+
+	measure 'Dif vs Nacional $' = IF ( NOT ISBLANK ( [Precio Promedio] ), [Precio Promedio] - [Precio Promedio Nacional] )
+		formatString: +$ #,##0;-$ #,##0;$ 0
+		displayFolder: 2. Comparación
+
+	measure 'Dif vs Nacional %' = DIVIDE ( [Dif vs Nacional $], [Precio Promedio Nacional] )
+		formatString: +0.0%;-0.0%;0.0%
+		displayFolder: 2. Comparación
+
+	/// Compara cada combustible contra su propio promedio país y promedia. Corrige el efecto mezcla.
+	measure 'Índice de Precio (País = 100)' =
+			AVERAGEX (
+			    VALUES ( dim_Combustible[tipo_combustible] ),
+			    DIVIDE ( [Precio Promedio], [Precio Promedio Nacional] )
+			) * 100
+		formatString: 0.0
+		displayFolder: 2. Comparación
+
+	/// Índice de precio menos 100. Positivo = más caro que el país, negativo = más barato.
+	measure 'Desvío vs País (pts)' =
+			VAR Idx = [Índice de Precio (País = 100)]
+			RETURN IF ( NOT ISBLANK ( Idx ), Idx - 100 )
+		formatString: +0.0;-0.0;0.0
+		displayFolder: 2. Comparación
+
+	/// Ranking entre todas las comunas visibles (1 = más barata).
+	measure 'Ranking Comuna (1 = más barata)' =
+			IF (
+			    ISINSCOPE ( dim_Comuna[comuna] ) && NOT ISBLANK ( [Precio Promedio] ),
+			    RANKX (
+			        FILTER ( ALLSELECTED ( dim_Comuna ), NOT ISBLANK ( [Precio Promedio] ) ),
+			        [Precio Promedio], , ASC, DENSE
+			    )
+			)
+		formatString: 0
+		displayFolder: 3. Ranking
+
+	/// Estación con el menor precio en el contexto. Usar con un combustible filtrado.
+	measure 'Estación Más Barata' =
+			VAR Top1 =
+			    TOPN (
+			        1,
+			        FILTER ( VALUES ( dim_Estacion[codigo_estacion] ), NOT ISBLANK ( [Precio Mínimo] ) ),
+			        [Precio Mínimo], ASC
+			    )
+			RETURN
+			    CONCATENATEX ( Top1, CALCULATE ( SELECTEDVALUE ( dim_Estacion[estacion] ) ), " / " )
+		displayFolder: 3. Ranking
+
+	/// Participación del distribuidor en el número de estaciones (respeta filtros geográficos).
+	measure '% Estaciones' = DIVIDE ( [N° Estaciones], CALCULATE ( [N° Estaciones], REMOVEFILTERS ( dim_Estacion[distribuidor] ) ) )
+		formatString: 0.0%
+		displayFolder: 4. Mercado
+
+	/// Diferencia de precio del distribuidor frente a la competencia en la MISMA comuna y combustible.
+	measure 'Prima de Marca $' =
+			AVERAGEX (
+			    FILTER (
+			        SUMMARIZE ( fact_Precios, dim_Comuna[codigo_comuna], dim_Combustible[tipo_combustible] ),
+			        NOT ISBLANK ( [Precio Promedio] )
+			    ),
+			    [Precio Promedio] - CALCULATE ( [Precio Promedio], REMOVEFILTERS ( dim_Estacion ) )
+			)
+		formatString: +$ #,##0;-$ #,##0;$ 0
+		displayFolder: 4. Mercado
+
+	measure 'Precio Asistido' = CALCULATE ( [Precio Promedio], dim_Combustible[tipo_atencion] = "Asistido", REMOVEFILTERS ( dim_Combustible[tipo_combustible], dim_Combustible[nombre_combustible] ) )
+		formatString: $ #,##0
+		isHidden
+		displayFolder: 5. Atención
+
+	measure 'Precio Autoservicio' = CALCULATE ( [Precio Promedio], dim_Combustible[tipo_atencion] = "Autoservicio", REMOVEFILTERS ( dim_Combustible[tipo_combustible], dim_Combustible[nombre_combustible] ) )
+		formatString: $ #,##0
+		isHidden
+		displayFolder: 5. Atención
+
+	/// Diferencia asistido - autoservicio, comparando dentro de la misma estación y combustible base.
+	measure 'Ahorro Autoservicio $' =
+			VAR Pares =
+			    FILTER (
+			        SUMMARIZE ( fact_Precios, fact_Precios[codigo_estacion], dim_Combustible[combustible_base] ),
+			        NOT ISBLANK ( [Precio Asistido] ) && NOT ISBLANK ( [Precio Autoservicio] )
+			    )
+			RETURN
+			    AVERAGEX ( Pares, [Precio Asistido] - [Precio Autoservicio] )
+		formatString: $ #,##0
+		displayFolder: 5. Atención
+
+	measure 'N° Estaciones con Autoservicio' = CALCULATE ( [N° Estaciones], dim_Combustible[tipo_atencion] = "Autoservicio" )
+		formatString: #,##0
+		displayFolder: 5. Atención
+
+	measure 'Fecha de Corte' = CALCULATE ( MAX ( fact_Precios[fecha_actualizacion] ), REMOVEFILTERS () )
+		formatString: dd-mm-yyyy
+		displayFolder: 6. Calidad de datos
+
+	measure 'Título Corte' = "Precios CNE al " & FORMAT ( [Fecha de Corte], "dd-mm-yyyy" )
+		displayFolder: 6. Calidad de datos
+
+	/// Porcentaje de precios informados hace más de 30 días respecto a la fecha de corte.
+	measure '% Precios Desactualizados (>30 días)' =
+			VAR Corte = [Fecha de Corte]
+			RETURN
+			    DIVIDE (
+			        COUNTROWS ( FILTER ( fact_Precios, fact_Precios[fecha_actualizacion] < Corte - 30 ) ),
+			        COUNTROWS ( fact_Precios )
+			    )
+		formatString: 0.0%
+		displayFolder: 6. Calidad de datos
+
+	/// Nombre de la estación solo si tiene precio en el contexto filtrado (evita que el mapa muestre estaciones fuera del filtro).
+	measure 'Estación (tooltip)' = IF ( NOT ISBLANK ( [Precio Promedio] ), SELECTEDVALUE ( dim_Estacion[estacion] ) )
+		displayFolder: 7. Mapa
+
+	measure 'Distribuidor (tooltip)' = IF ( NOT ISBLANK ( [Precio Promedio] ), SELECTEDVALUE ( dim_Estacion[distribuidor] ) )
+		displayFolder: 7. Mapa
+
+	/// Versiones texto para tarjetas KPI: evitan que Power BI abrevie a "mil".
+	measure 'Precio Promedio (tarjeta)' = IF ( NOT ISBLANK ( [Precio Promedio] ), FORMAT ( [Precio Promedio], "$ #,##0" ) )
+		displayFolder: 8. Tarjetas
+
+	measure 'Precio Mínimo (tarjeta)' = IF ( NOT ISBLANK ( [Precio Mínimo] ), FORMAT ( [Precio Mínimo], "$ #,##0" ) )
+		displayFolder: 8. Tarjetas
+
+	measure 'Precio Máximo (tarjeta)' = IF ( NOT ISBLANK ( [Precio Máximo] ), FORMAT ( [Precio Máximo], "$ #,##0" ) )
+		displayFolder: 8. Tarjetas
