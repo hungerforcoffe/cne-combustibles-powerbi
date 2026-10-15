@@ -1,0 +1,8 @@
+# Archivos temporales de Windows y Office
+desktop.ini
+Thumbs.db
+~$*
+
+# Respaldos y caché de Power BI
+*.pbix.bak
+.pbi/cache.abf
